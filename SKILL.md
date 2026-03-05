@@ -107,9 +107,30 @@ Best for: OpenRouter models like Gemini 3.1 Flash, Riverflow, Seedream.
 
 ## Output
 
-- `*.png` images
+- `*.png` images (saved to `tmp/claw-openrouter-image-gen-YYYY-MM-DD-HH-MM-SS/`)
 - `prompts.json` (prompt → file mapping)
 - `index.html` (thumbnail gallery)
+
+## Sending to Discord
+
+After generating images, use the OpenClaw `message` tool to send them to Discord:
+
+```python
+# Send with a message
+message(action="send", channel="discord", target="CHANNEL_ID", message="Your caption here")
+message(action="send", channel="discord", target="CHANNEL_ID", filePath="/path/to/image.png")
+```
+
+**Important:** The script outputs to a timestamped folder in either:
+- `./tmp/` (if ~/Projects/tmp doesn't exist)
+- `~/Projects/tmp/` (if it exists)
+
+Find the latest output:
+```bash
+ls -lt tmp/ | head -5
+```
+
+Or use the path printed in the output (e.g., `tmp/claw-openrouter-image-gen-2026-03-05-18-17-18/`)
 
 ## Examples
 
