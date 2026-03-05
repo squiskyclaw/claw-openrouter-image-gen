@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """OpenRouter image generation script.
 
-Generates images via OpenRouter's API with automatic fallback for different
-modalities. Supports multiple models and produces a gallery HTML page.
+Generates images via OpenRouter's API with support for multiple API methods:
+- Chat Completions: Uses the chat/completions endpoint with modalities
+- Images Generations: Uses the v1/images/generations endpoint
+
+Supports local LiteLLM deployment by configuring the base URL.
 """
 
 from __future__ import annotations
@@ -20,27 +23,22 @@ import urllib.request
 from dataclasses import dataclass
 from html import escape as html_escape
 from pathlib import Path
-from typing import NamedTuple
 
 # ============================================================================
 # Constants
 # ============================================================================
 
 DEFAULT_MODEL = "google/gemini-3.1-flash-image-preview"
-API_URL = os.environ.get("OPENROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+DEFAULT_IMAGE_SIZE = "1024x1024"
 API_TIMEOUT = 300
+
+# Default base URL - can be overridden via OPENROUTER_BASE_URL env var
+# If not set, defaults to OpenRouter; append appropriate endpoint path
+DEFAULT_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 # ============================================================================
 # Data Classes
 # ============================================================================
-
-
-@dataclass
-class ImageResult:
-    """Result from the OpenRouter API."""
-    prompt: str
-    filename: str
-    file_path: Path
 
 
 @dataclass
@@ -107,29 +105,78 @@ def pick_prompts(count: int) -> list[str]:
 
 
 # ============================================================================
-# API Functions
+# API Classes
 # ============================================================================
 
-class OpenRouterAPI:
-    """OpenRouter API client with fallback handling."""
+class ChatCompletionsAPI:
+    """Chat Completions API client (OpenRouter default)."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, base_url: str):
         self.api_key = api_key
+        self.url = f"{base_url}/chat/completions"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
-    def _make_request(self, model: str, prompt: str, modalities: list[str]) -> dict:
-        """Make a request to the OpenRouter API."""
+    def generate_image(self, model: str, prompt: str) -> dict:
+        """Generate image via chat completions with modality fallback."""
+        for modalities in [["image", "text"], ["image"]]:
+            try:
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "modalities": modalities,
+                }
+
+                req = urllib.request.Request(
+                    self.url,
+                    method="POST",
+                    headers=self.headers,
+                    data=json.dumps(payload).encode("utf-8"),
+                )
+
+                with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue  # Try next modality
+                payload = e.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"API failed ({e.code}): {payload}") from e
+
+        raise RuntimeError("API failed: no supported modalities available")
+
+    def extract_image_url(self, response: dict) -> str | None:
+        """Extract image URL from chat completions response."""
+        message = response.get("choices", [{}])[0].get("message", {})
+        images = message.get("images", [])
+        if not images:
+            return None
+        return images[0].get("image_url", {}).get("url")
+
+
+class ImagesGenerationsAPI:
+    """Images Generations API client (OpenAI-compatible)."""
+
+    def __init__(self, api_key: str, base_url: str):
+        self.api_key = api_key
+        self.url = f"{base_url}/images/generations"
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def generate_image(self, model: str, prompt: str, size: str = DEFAULT_IMAGE_SIZE) -> dict:
+        """Generate image via images/generations endpoint."""
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "modalities": modalities,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
         }
 
         req = urllib.request.Request(
-            API_URL,
+            self.url,
             method="POST",
             headers=self.headers,
             data=json.dumps(payload).encode("utf-8"),
@@ -138,41 +185,13 @@ class OpenRouterAPI:
         with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def generate_image(self, model: str, prompt: str) -> dict:
-        """
-        Generate an image via OpenRouter API.
-
-        Tries modalities in order:
-        1. ["image", "text"] - Full multimodal
-        2. ["image"] - Image only fallback
-
-        Raises:
-            RuntimeError: If all attempts fail.
-        """
-        for modalities in [["image", "text"], ["image"]]:
-            try:
-                return self._make_request(model, prompt, modalities)
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    continue  # Try next modality
-                # Other errors (429, etc.) - raise immediately
-                payload = e.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"OpenRouter API failed ({e.code}): {payload}") from e
-
-        # If we get here, all modalities failed
-        msg = "OpenRouter API failed: no supported modalities available"
-        raise RuntimeError(msg)
-
-
-def extract_image_url(response: dict) -> str | None:
-    """Extract the image URL from the API response."""
-    message = response.get("choices", [{}])[0].get("message", {})
-    images = message.get("images", [])
-    
-    if not images:
-        return None
-    
-    return images[0].get("image_url", {}).get("url")
+    def extract_image_url(self, response: dict) -> str | None:
+        """Extract image URL from images/generations response."""
+        data = response.get("data", [])
+        if not data:
+            return None
+        # Can be URL or base64
+        return data[0].get("url") or data[0].get("b64_json")
 
 
 # ============================================================================
@@ -180,13 +199,20 @@ def extract_image_url(response: dict) -> str | None:
 # ============================================================================
 
 def download_image(image_url: str, filepath: Path) -> None:
-    """Download an image from a URL or base64 data URL."""
+    """Download an image from a URL or handle base64 data URL."""
     if image_url.startswith("data:"):
         # Extract base64 data from data URL
         _, b64data = image_url.split(",", 1)
         filepath.write_bytes(base64.b64decode(b64data))
-    else:
+    elif image_url.startswith("data:image"):  # Without prefix
+        import base64 as b64_module
+        header, b64data = image_url.split(",", 1)
+        filepath.write_bytes(b64_module.b64decode(b64data))
+    elif image_url.startswith("http"):
         urllib.request.urlretrieve(image_url, filepath)
+    else:
+        # Assume it's base64 without data URL prefix
+        filepath.write_bytes(base64.b64decode(image_url))
 
 
 def write_gallery(out_dir: Path, items: list[GalleryItem]) -> None:
@@ -232,6 +258,17 @@ def main() -> int:
     parser.add_argument("--count", type=int, default=8, help="How many images to generate.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Image model id (default: {DEFAULT_MODEL}).")
     parser.add_argument("--out-dir", default="", help="Output directory (default: ./tmp/claw-openrouter-image-gen-<ts>).")
+    parser.add_argument(
+        "--api-method",
+        choices=["chat", "images"],
+        default="chat",
+        help="API method to use: 'chat' for /v1/chat/completions (default), 'images' for /v1/images/generations"
+    )
+    parser.add_argument(
+        "--image-size",
+        default=DEFAULT_IMAGE_SIZE,
+        help=f"Image size for 'images' API method (default: {DEFAULT_IMAGE_SIZE}). Examples: 1024x1024, 1792x1024, 1024x1792"
+    )
     args = parser.parse_args()
 
     # Get API key
@@ -240,11 +277,19 @@ def main() -> int:
         print("Missing OPENROUTER_API_KEY", file=sys.stderr)
         return 2
 
+    # Get base URL
+    base_url = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL)
+
+    # Select API method
+    if args.api_method == "images":
+        api = ImagesGenerationsAPI(api_key, base_url)
+    else:
+        api = ChatCompletionsAPI(api_key, base_url)
+
     # Setup
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    api = OpenRouterAPI(api_key)
     prompts = [args.prompt] * args.count if args.prompt else pick_prompts(args.count)
 
     # Generate images
@@ -252,8 +297,12 @@ def main() -> int:
     for idx, prompt in enumerate(prompts, start=1):
         print(f"[{idx}/{len(prompts)}] {prompt}")
 
-        res = api.generate_image(args.model, prompt)
-        image_url = extract_image_url(res)
+        if args.api_method == "images":
+            res = api.generate_image(args.model, prompt, args.image_size)
+        else:
+            res = api.generate_image(args.model, prompt)
+        
+        image_url = api.extract_image_url(res)
 
         if not image_url:
             raise RuntimeError(f"Unexpected response: {json.dumps(res)[:400]}")
