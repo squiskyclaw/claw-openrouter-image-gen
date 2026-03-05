@@ -173,6 +173,10 @@ class ImagesGenerationsAPI:
             "prompt": prompt,
             "n": 1,
             "size": size,
+            # Request base64 JSON response for embedded images
+            "extra_body": {
+                "response_format": "b64_json"
+            }
         }
 
         req = urllib.request.Request(
@@ -186,12 +190,27 @@ class ImagesGenerationsAPI:
             return json.loads(resp.read().decode("utf-8"))
 
     def extract_image_url(self, response: dict) -> str | None:
-        """Extract image URL from images/generations response."""
+        """Extract image from images/generations response.
+        
+        Handles both URL and base64 responses:
+        - {"data": [{"url": "https://..."}]}
+        - {"data": [{"b64_json": "base64data..."}]}
+        """
         data = response.get("data", [])
         if not data:
             return None
-        # Can be URL or base64
-        return data[0].get("url") or data[0].get("b64_json")
+        
+        item = data[0]
+        
+        # Check for base64 first (preferred for local)
+        if item.get("b64_json"):
+            return item["b64_json"]
+        
+        # Fall back to URL
+        if item.get("url"):
+            return item["url"]
+        
+        return None
 
 
 # ============================================================================
