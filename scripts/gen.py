@@ -166,7 +166,7 @@ class ImagesGenerationsAPI:
             "Content-Type": "application/json",
         }
 
-    def generate_image(self, model: str, prompt: str, size: str = DEFAULT_IMAGE_SIZE) -> dict:
+    def generate_image(self, model: str, prompt: str, size: str = DEFAULT_IMAGE_SIZE, seed: int = None) -> dict:
         """Generate image via images/generations endpoint."""
         payload = {
             "model": model,
@@ -178,6 +178,10 @@ class ImagesGenerationsAPI:
                 "response_format": "b64_json"
             }
         }
+        
+        # Add seed for variation if provided
+        if seed is not None:
+            payload["seed"] = seed
 
         req = urllib.request.Request(
             self.url,
@@ -288,6 +292,11 @@ def main() -> int:
         default=DEFAULT_IMAGE_SIZE,
         help=f"Image size for 'images' API method (default: {DEFAULT_IMAGE_SIZE}). Examples: 1024x1024, 1792x1024, 1024x1792"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Seed for images/generations API to get reproducible results. Will increment for each image if count > 1."
+    )
     args = parser.parse_args()
 
     # Get API key
@@ -311,13 +320,19 @@ def main() -> int:
 
     prompts = [args.prompt] * args.count if args.prompt else pick_prompts(args.count)
 
+    # Calculate seeds if provided
+    start_seed = args.seed if args.seed else None
+
     # Generate images
     items: list[GalleryItem] = []
     for idx, prompt in enumerate(prompts, start=1):
         print(f"[{idx}/{len(prompts)}] {prompt}")
 
+        # Calculate seed for this image (increment if multiple)
+        current_seed = start_seed + idx - 1 if start_seed is not None else None
+
         if args.api_method == "images":
-            res = api.generate_image(args.model, prompt, args.image_size)
+            res = api.generate_image(args.model, prompt, args.image_size, current_seed)
         else:
             res = api.generate_image(args.model, prompt)
         
